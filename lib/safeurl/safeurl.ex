@@ -8,7 +8,8 @@ defmodule SafeURL do
   allowed to make requests.
 
   You can use `allowed?/2` or `validate/2` to check if a
-  URL is safe to call.
+  URL is safe to call, and `pin/2` to get a URL that connects
+  to the very address that passed validation.
 
 
   ## Examples
@@ -25,6 +26,9 @@ defmodule SafeURL do
       iex> SafeURL.validate("http://230.10.10.10/", block_reserved: false)
       :ok
 
+      iex> SafeURL.pin("https://includesecurity.com/robots.txt")
+      {:ok, %{url: "https://192.0.78.24/robots.txt", hostname: "includesecurity.com", address: {192, 0, 78, 24}}}
+
       # If HTTPoison is available:
 
       iex> SafeURL.HTTPoison.get("https://10.0.0.1/ssrf.txt")
@@ -32,6 +36,31 @@ defmodule SafeURL do
 
       iex> SafeURL.HTTPoison.get("https://google.com/")
       {:ok, %HTTPoison.Response{...}}
+
+
+  ## Validation
+
+  The host of the URL is resolved once, and every address it
+  resolves to (IPv4 and IPv6) has to pass the allowlist or the
+  blocklist. A host that does not resolve to any address is
+  rejected with `:unresolved_host` rather than let through.
+
+  IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`) are checked as
+  the IPv4 address they carry.
+
+
+  ## Pinning
+
+  Validating a hostname and then handing that hostname to an HTTP
+  client resolves it twice, and the second lookup can return a
+  different address than the one that was checked (DNS rebinding).
+  `pin/2` returns the URL with the host replaced by the validated
+  address, together with the original hostname, so the client
+  connects to the checked address and still sends the right `Host`
+  header, SNI and certificate hostname:
+
+      {:ok, %{url: url, hostname: hostname}} = SafeURL.pin("https://example.com/data")
+      Req.get!(url, connect_options: [hostname: hostname])
 
 
   ## Options
@@ -52,8 +81,8 @@ defmodule SafeURL do
       `["http, "https"]`.
 
     * `:dns_module` - Any module that implements the
-      `SafeURL.DNSResolver` behaviour. Defaults to `DNS` from
-      the `:dns` package.
+      `SafeURL.DNSResolver` behaviour. Defaults to `SafeURL.DNS`,
+      which looks up A and AAAA records with the `:dns` package.
 
     * `:detailed_error` - Return specific error if validation fails. If set to
       `false`, `validate/2` will return `{:error, :restricted}` regardless of
@@ -89,25 +118,55 @@ defmodule SafeURL do
 
   """
 
-  @reserved_ranges [
-    "0.0.0.0/8",
-    "10.0.0.0/8",
-    "100.64.0.0/10",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.0.0.0/29",
-    "192.0.2.0/24",
-    "192.88.99.0/24",
-    "192.168.0.0/16",
-    "198.18.0.0/15",
-    "198.51.100.0/24",
-    "203.0.113.0/24",
-    "224.0.0.0/4",
-    "240.0.0.0/4"
-  ]
+  import Bitwise
 
-  @type error() :: :unsafe_scheme | :unsafe_allowlist | :unsafe_blocklist | :unsafe_reserved
+  @reserved_ranges Enum.map(
+                     ~w[
+                       0.0.0.0/8
+                       10.0.0.0/8
+                       100.64.0.0/10
+                       127.0.0.0/8
+                       169.254.0.0/16
+                       172.16.0.0/12
+                       192.0.0.0/24
+                       192.0.2.0/24
+                       192.88.99.0/24
+                       192.168.0.0/16
+                       198.18.0.0/15
+                       198.51.100.0/24
+                       203.0.113.0/24
+                       224.0.0.0/4
+                       240.0.0.0/4
+                       ::/128
+                       ::1/128
+                       ::ffff:0:0/96
+                       64:ff9b::/96
+                       64:ff9b:1::/48
+                       100::/64
+                       2001::/32
+                       2001:2::/48
+                       2001:10::/28
+                       2001:20::/28
+                       2001:db8::/32
+                       2002::/16
+                       3fff::/20
+                       5f00::/16
+                       fc00::/7
+                       fe80::/10
+                       fec0::/10
+                       ff00::/8
+                     ],
+                     &InetCidr.parse_cidr!/1
+                   )
+
+  @type error() ::
+          :unsafe_scheme
+          | :unsafe_allowlist
+          | :unsafe_blocklist
+          | :unsafe_reserved
+          | :unresolved_host
+
+  @type pinned() :: %{url: binary(), hostname: binary(), address: :inet.ip_address()}
 
   # Public API
   # ----------
@@ -116,7 +175,7 @@ defmodule SafeURL do
   Validate a string URL against a blocklist or allowlist.
 
   This method checks if a URL is safe to be called by looking at
-  its scheme and resolved IP address, and matching it against
+  its scheme and resolved IP addresses, and matching them against
   reserved CIDR ranges, and any provided allowlist/blocklist.
 
   Returns `true` if the URL meets the requirements,
@@ -150,10 +209,12 @@ defmodule SafeURL do
   Alternative method of validating a URL, returning result tuple instead
   of booleans.
 
-  This calls `allowed?/2` underneath to check if a URL is safe to
-  be called. If it is, it returns `:ok`, otherwise an error tuple with a
+  If the URL is safe, it returns `:ok`, otherwise an error tuple with a
   specific reason. If `:detailed_error` is set to `false`, the error is always
   `{:error, :restricted}`.
+
+  Prefer `pin/2` when you are about to make the request yourself, see
+  [`Pinning`](#module-pinning).
 
   ## Examples
 
@@ -173,26 +234,48 @@ defmodule SafeURL do
   """
   @spec validate(binary(), Keyword.t()) :: :ok | {:error, error()} | {:error, :restricted}
   def validate(url, opts \\ []) do
+    with {:ok, _pinned} <- pin(url, opts) do
+      :ok
+    end
+  end
+
+  @doc """
+  Validate a URL and return it pinned to the address that passed.
+
+  The returned `:url` has the host replaced by the first validated
+  address, `:hostname` is the host as it was in the URL (for the `Host`
+  header, SNI and certificate verification) and `:address` is the
+  validated address as an `:inet` tuple. Connecting to `:url` instead
+  of the original one makes sure the request reaches the address that
+  was checked, see [`Pinning`](#module-pinning).
+
+  Errors are the same as for `validate/2`.
+
+  ## Examples
+
+      iex> SafeURL.pin("https://includesecurity.com/robots.txt")
+      {:ok, %{url: "https://192.0.78.24/robots.txt", hostname: "includesecurity.com", address: {192, 0, 78, 24}}}
+
+      iex> SafeURL.pin("https://[::1]/")
+      {:error, :unsafe_reserved}
+
+  ## Options
+
+  See [`Options`](#module-options) section above.
+
+  """
+  @spec pin(binary(), Keyword.t()) :: {:ok, pinned()} | {:error, error()} | {:error, :restricted}
+  def pin(url, opts \\ []) do
     uri = URI.parse(url)
     opts = build_options(opts)
-    address = resolve_address(uri.host, opts.dns_module)
 
     result =
-      cond do
-        uri.scheme not in opts.schemes ->
-          {:error, :unsafe_scheme}
-
-        opts.allowlist != [] ->
-          if ip_in_ranges?(address, opts.allowlist), do: :ok, else: {:error, :unsafe_allowlist}
-
-        opts.blocklist != [] and ip_in_ranges?(address, opts.blocklist) ->
-          {:error, :unsafe_blocklist}
-
-        opts.block_reserved and ip_in_ranges?(address, @reserved_ranges) ->
-          {:error, :unsafe_reserved}
-
-        true ->
-          :ok
+      with :ok <- validate_scheme(uri.scheme, opts),
+           {:ok, addresses} <- resolve_addresses(uri.host, opts.dns_module),
+           :ok <- validate_addresses(addresses, opts) do
+        address = hd(addresses)
+        pinned_uri = %{uri | host: address |> :inet.ntoa() |> List.to_string()}
+        {:ok, %{url: URI.to_string(pinned_uri), hostname: uri.host, address: address}}
       end
 
     with {:error, _} <- result do
@@ -227,31 +310,71 @@ defmodule SafeURL do
   defp get_option(opts, key),
     do: Keyword.get_lazy(opts, key, fn -> Application.get_env(:safeurl, key) end)
 
-  # Resolve hostname in DNS to an IP address (if not already an IP)
-  defp resolve_address(hostname, dns_module) do
-    hostname
-    |> to_charlist()
-    |> :inet.parse_address()
-    |> case do
+  defp validate_scheme(scheme, opts) do
+    if scheme in opts.schemes, do: :ok, else: {:error, :unsafe_scheme}
+  end
+
+  # Resolve hostname in DNS to its IP addresses (if not already an IP).
+  # A host without any address is an error: letting it through would
+  # let the HTTP client connect to whatever it resolves to later.
+  defp resolve_addresses(hostname, _dns_module) when hostname in [nil, ""] do
+    {:error, :unresolved_host}
+  end
+
+  defp resolve_addresses(hostname, dns_module) do
+    case :inet.parse_address(to_charlist(hostname)) do
       {:ok, ip} ->
-        ip
+        {:ok, [normalize(ip)]}
 
       {:error, :einval} ->
-        # TODO: safely handle multiple IPs/round-robin DNS
         case dns_module.resolve(hostname) do
-          {:ok, [ip | _]} -> ip
-          {:error, _reason} -> nil
+          {:ok, [_ | _] = ips} -> {:ok, Enum.map(ips, &normalize/1)}
+          {:ok, []} -> {:error, :unresolved_host}
+          {:error, _reason} -> {:error, :unresolved_host}
         end
     end
   end
 
-  defp ip_in_ranges?({_, _, _, _} = addr, ranges) when is_list(ranges) do
-    Enum.any?(ranges, fn range ->
-      range
-      |> InetCidr.parse_cidr!()
-      |> InetCidr.contains?(addr)
+  # An IPv4-mapped IPv6 address reaches the IPv4 host it carries, so it is
+  # checked as that IPv4 address.
+  defp normalize({0, 0, 0, 0, 0, 0xFFFF, ab, cd}) do
+    {ab >>> 8, ab &&& 0xFF, cd >>> 8, cd &&& 0xFF}
+  end
+
+  defp normalize(ip), do: ip
+
+  # Every address the host resolves to has to pass, otherwise a host with one
+  # public and one internal address gets through on the public one.
+  defp validate_addresses(addresses, opts) do
+    Enum.reduce_while(addresses, :ok, fn address, :ok ->
+      case validate_address(address, opts) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
     end)
   end
 
-  defp ip_in_ranges?(_addr, _ranges), do: false
+  defp validate_address(address, opts) do
+    cond do
+      opts.allowlist != [] ->
+        if ip_in_ranges?(address, opts.allowlist), do: :ok, else: {:error, :unsafe_allowlist}
+
+      opts.blocklist != [] and ip_in_ranges?(address, opts.blocklist) ->
+        {:error, :unsafe_blocklist}
+
+      opts.block_reserved and Enum.any?(@reserved_ranges, &InetCidr.contains?(&1, address)) ->
+        {:error, :unsafe_reserved}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp ip_in_ranges?(address, ranges) when is_list(ranges) do
+    Enum.any?(ranges, fn range ->
+      range
+      |> InetCidr.parse_cidr!()
+      |> InetCidr.contains?(address)
+    end)
+  end
 end

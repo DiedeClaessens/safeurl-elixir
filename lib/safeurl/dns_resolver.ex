@@ -5,10 +5,14 @@ defmodule SafeURL.DNSResolver do
   implementation of `SafeURL.DNSResolver` in the global
   or local config.
 
-  By default, the `DNS` package is used for resolution,
-  but you can replace it with a wrapper that uses
-  different configuration or a completely different
-  implementation altogether.
+  By default, `SafeURL.DNS` looks up the A and AAAA records
+  with the `DNS` package, but you can replace it with a
+  wrapper that uses different configuration or a completely
+  different implementation altogether.
+
+  A resolver has to return every address the host resolves
+  to: `SafeURL` validates all of them and rejects the URL if
+  any one is not allowed.
 
 
   ## Use-cases
@@ -69,5 +73,5 @@ defmodule SafeURL.DNSResolver do
 
   """
 
-  @callback resolve(host :: String.t()) :: {:ok, list()} | {:error, :inet_res.res_error()}
+  @callback resolve(host :: String.t()) :: {:ok, [:inet.ip_address()]} | {:error, term()}
 end

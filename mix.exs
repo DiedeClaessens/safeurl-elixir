@@ -3,7 +3,7 @@ defmodule SafeURL.MixProject do
 
   @app :safeurl
   @name "SafeURL"
-  @version "1.0.0"
+  @version "1.1.0"
   @github "https://github.com/slab/safeurl-elixir"
 
   def project do
@@ -44,7 +44,7 @@ defmodule SafeURL.MixProject do
       block_reserved: true,
       blocklist: [],
       allowlist: [],
-      dns_module: DNS,
+      dns_module: SafeURL.DNS,
       detailed_error: true
     ]
   end

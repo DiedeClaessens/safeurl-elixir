@@ -84,7 +84,7 @@ following options:
 - `:schemes` - List of allowed URL schemes. Defaults to `["http, "https"]`.
 
 - `:dns_module` - Any module that implements the `SafeURL.DNSResolver` behaviour.
-  Defaults to `DNS` from the [`:dns`][lib-dns] package.
+  Defaults to `SafeURL.DNS`, which looks up A and AAAA records with the [`:dns`][lib-dns] package.
 
 - `:detailed_error` - Return specific error if validation fails. If set to `false`, `validate/2` will return `{:error, :restricted}` regardless of the reason. Defaults to `true`.
 
@@ -157,6 +157,31 @@ end
 
 <br>
 
+## Pinning the validated address
+
+Validating a hostname and then handing that hostname to an HTTP client resolves it twice,
+and the second lookup can return a different address than the one that was checked (DNS
+rebinding). `pin/2` returns the URL with the host replaced by the validated address, together
+with the original hostname for the `Host` header, SNI and certificate verification:
+
+```elixir
+iex> SafeURL.pin("https://includesecurity.com/robots.txt")
+{:ok, %{url: "https://192.0.78.24/robots.txt", hostname: "includesecurity.com", address: {192, 0, 78, 24}}}
+```
+
+With [Req][lib-req], for example:
+
+```elixir
+with {:ok, %{url: url, hostname: hostname}} <- SafeURL.pin(url) do
+  Req.get(url, connect_options: [hostname: hostname])
+end
+```
+
+Every address the host resolves to, IPv4 and IPv6, has to pass validation, and a host without
+any address is rejected with `:unresolved_host`.
+
+<br>
+
 ## Custom DNS Resolver
 
 In some cases you might want to use a custom strategy for DNS resolution. You can do so by
@@ -220,6 +245,7 @@ SafeURL is officially maintained by the team at [Slab][slab]. It was originally 
 [docs]: https://hexdocs.pm/safeurl
 [docs-get]: https://hexdocs.pm/safeurl/SafeURL.html#get/4
 [docs-dns]: https://hexdocs.pm/safeurl/SafeURL.DNSResolver.html
+[lib-req]: https://hexdocs.pm/req
 [lib-dns]: https://github.com/tungd/elixir-dns
 [lib-tesla]: https://github.com/elixir-tesla/tesla
 [lib-httpoison]: https://github.com/edgurgel/httpoison
