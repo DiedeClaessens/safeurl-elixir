@@ -3,7 +3,7 @@ defmodule SafeURL.MixProject do
 
   @app :safeurl
   @name "SafeURL"
-  @version "1.0.0"
+  @version "1.1.0"
   @github "https://github.com/slab/safeurl-elixir"
 
   def project do
@@ -24,7 +24,11 @@ defmodule SafeURL.MixProject do
         source_url: @github,
         homepage_url: @github,
         canonical: "https://hexdocs.pm/#{@app}",
-        extras: ["README.md", "guides/migrating_to_1.0.md"]
+        extras: [
+          "README.md",
+          "guides/migrating_to_1.1.md",
+          "guides/migrating_to_1.0.md"
+        ]
       ]
     ]
   end
@@ -44,7 +48,7 @@ defmodule SafeURL.MixProject do
       block_reserved: true,
       blocklist: [],
       allowlist: [],
-      dns_module: DNS,
+      dns_module: SafeURL.DNS,
       detailed_error: true
     ]
   end

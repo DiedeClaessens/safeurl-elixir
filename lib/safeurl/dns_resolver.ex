@@ -5,10 +5,14 @@ defmodule SafeURL.DNSResolver do
   implementation of `SafeURL.DNSResolver` in the global
   or local config.
 
-  By default, the `DNS` package is used for resolution,
-  but you can replace it with a wrapper that uses
-  different configuration or a completely different
-  implementation altogether.
+  By default, `SafeURL.DNS` looks up the A and AAAA records
+  with the `DNS` package, but you can replace it with a
+  wrapper that uses different configuration or a completely
+  different implementation altogether.
+
+  A resolver has to return every address the host resolves
+  to: `SafeURL` validates all of them and rejects the URL if
+  any one is not allowed.
 
 
   ## Use-cases
@@ -25,6 +29,11 @@ defmodule SafeURL.DNSResolver do
   only one `c:resolve/1` callback that takes a host and
   returns a list of resolved IPs.
 
+  A resolver must return every address of every family the
+  host has. Returning only the A records would let a host
+  whose AAAA record points at an internal address through,
+  which is what `SafeURL.DNS` avoids by querying both.
+
   As an example, suppose you wanted to use
   [Cloudflare's DNS](https://1.1.1.1/dns/), you can do
   that by wrapping `DNS` with your own settings in a new
@@ -35,7 +44,17 @@ defmodule SafeURL.DNSResolver do
 
         @impl true
         def resolve(domain) do
-          DNS.resolve(domain, :a, {"1.1.1.1", 53}, :udp)
+          with {:ok, ipv4} <- query(domain, :a),
+               {:ok, ipv6} <- query(domain, :aaaa) do
+            {:ok, ipv4 ++ ipv6}
+          end
+        end
+
+        defp query(domain, type) do
+          case DNS.resolve(domain, type, {"1.1.1.1", 53}, :udp) do
+            {:ok, ips} -> {:ok, ips}
+            {:error, _reason} -> {:ok, []}
+          end
         end
       end
 
@@ -67,7 +86,10 @@ defmodule SafeURL.DNSResolver do
         def resolve(_domain),      do: {:ok, [{192, 168, 1, 99}]}
       end
 
+  A resolver that returns an empty list, or an error, makes
+  the URL fail validation with `{:error, :unresolved_host}`.
+
   """
 
-  @callback resolve(host :: String.t()) :: {:ok, list()} | {:error, :inet_res.res_error()}
+  @callback resolve(host :: String.t()) :: {:ok, [:inet.ip_address()]} | {:error, term()}
 end

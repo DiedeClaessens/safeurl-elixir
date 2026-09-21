@@ -40,8 +40,10 @@ To use SafeURL with your favorite HTTP Client, see the [HTTP Clients][readme-htt
 CIDR ranges to the blocklist, or alternatively allow specific CIDR ranges to which the
 application is allowed to make requests.
 
-You can use `allowed?/2` or `validate/2` to check if a URL is safe to call. If you have the
-[`HTTPoison`][lib-httpoison] application available, you can also call `get/4` which will
+You can use `allowed?/2` or `validate/2` to check if a URL is safe to call, and
+[`pin/2`][docs-pin] to get a URL that connects to the very address that passed. If you have the
+[`HTTPoison`][lib-httpoison] application available, you can also call
+[`SafeURL.HTTPoison.get/3`][docs-get] which will
 validate the host automatically before making a web request, and return an error otherwise.
 
 ```elixir
@@ -84,7 +86,7 @@ following options:
 - `:schemes` - List of allowed URL schemes. Defaults to `["http, "https"]`.
 
 - `:dns_module` - Any module that implements the `SafeURL.DNSResolver` behaviour.
-  Defaults to `DNS` from the [`:dns`][lib-dns] package.
+  Defaults to `SafeURL.DNS`, which looks up A and AAAA records with the [`:dns`][lib-dns] package.
 
 - `:detailed_error` - Return specific error if validation fails. If set to `false`, `validate/2` will return `{:error, :restricted}` regardless of the reason. Defaults to `true`.
 
@@ -109,37 +111,52 @@ While SafeURL already provides a convenient [`SafeURL.HTTPoison.get/3`][docs-get
 before making GET HTTP requests, you can also write your own wrappers, helpers or
 middleware to work with the HTTP Client of your choice.
 
+Validating a URL and then handing the hostname to an HTTP client resolves it twice, and the
+second lookup can return a different address than the one that was checked. Use
+[`pin/2`][docs-pin] so your client connects to the address that passed, and keep the hostname
+for the `Host` header, the server name and the certificate check. See
+[Pinning the validated address](#pinning-the-validated-address).
+
 ### HTTPoison
 
-For [HTTPoison][lib-httpoison], you can create a wrapper module that validates hosts
-before making HTTP requests:
+[`SafeURL.HTTPoison.get/3`][docs-get] already pins the request, sends the hostname as the
+`host` header and rebuilds hackney's TLS options from that hostname, so the certificate is
+still verified against the name. For the other verbs, wrap it the same way:
 
 ```elixir
 defmodule CustomClient do
   def request(method, url, body, headers \\ [], opts \\ []) do
     {safeurl_opts, opts} = Keyword.pop(opts, :safeurl, [])
 
-    with :ok <- SafeURL.validate(url, safeurl_opts) do
-      HTTPoison.request(method, url, body, headers, opts)
+    with {:ok, pinned} <- SafeURL.pin(url, safeurl_opts) do
+      HTTPoison.request(method, pinned.url, body, host_header(headers, pinned), opts)
     end
   end
 
-  def get(url, headers \\ [], opts \\ []),        do: request(:get, url, "", headers, opts)
-  def post(url, body, headers \\ [], opts \\ []), do: request(:post, url, body, headers, opts)
-  # ...
+  defp host_header(headers, pinned) do
+    [{"host", pinned.hostname} | Enum.reject(headers, fn {name, _} -> name == "host" end)]
+  end
 end
 ```
+
+Passing your own `:ssl_options` to hackney replaces its TLS defaults rather than adding to
+them, so a wrapper that needs to pin an `https` request should build the full set from the
+hostname the way `SafeURL.HTTPoison.get/3` does, or leave `https` to it.
 
 And you can use it as:
 
 ```elixir
-iex> CustomClient.get("http://230.10.10.10/data.json", [], safeurl: [block_reserved: false], recv_timeout: 500)
+iex> CustomClient.request(:get, "http://230.10.10.10/data.json", "", [], safeurl: [block_reserved: false], recv_timeout: 500)
 {:ok, %HTTPoison.Response{...}}
 ```
 
 ### Tesla
 
-For [Tesla][lib-tesla], `SafeURL` provides a helper middleware out-of-the-box, which you can plug anywhere you're using `Tesla`:
+For [Tesla][lib-tesla], `SafeURL` provides a helper middleware out-of-the-box, which you can plug anywhere you're using `Tesla`.
+It pins the request where it can do so without weakening TLS, which means any request without TLS, and
+`https` with `Tesla.Adapter.Hackney`. With another adapter an `https` request is validated but not pinned,
+so call [`pin/2`][docs-pin] yourself and pass the hostname through that adapter's connect options.
+Place it after `Tesla.Middleware.FollowRedirects` if you follow redirects, so that every hop is validated:
 
 ```elixir
 defmodule DocumentService do
@@ -154,6 +171,40 @@ defmodule DocumentService do
   end
 end
 ```
+
+<br>
+
+## Pinning the validated address
+
+Validating a hostname and then handing that hostname to an HTTP client resolves it twice,
+and the second lookup can return a different address than the one that was checked (DNS
+rebinding). `pin/2` returns the URL with the host replaced by the validated address, together
+with the original hostname for the `Host` header, SNI and certificate verification:
+
+```elixir
+iex> SafeURL.pin("https://includesecurity.com/robots.txt")
+{:ok,
+ %{
+   url: "https://192.0.78.24/robots.txt",
+   hostname: "includesecurity.com",
+   address: {192, 0, 78, 24},
+   scheme: "https",
+   port: 443
+ }}
+```
+
+Only the first validated address is returned; the others were validated too.
+
+With [Req][lib-req], for example:
+
+```elixir
+with {:ok, %{url: url, hostname: hostname}} <- SafeURL.pin(url) do
+  Req.get(url, connect_options: [hostname: hostname])
+end
+```
+
+Every address the host resolves to, IPv4 and IPv6, has to pass validation, and a host without
+any address is rejected with `:unresolved_host`.
 
 <br>
 
@@ -218,8 +269,10 @@ SafeURL is officially maintained by the team at [Slab][slab]. It was originally 
 [includesecurity]: https://github.com/IncludeSecurity
 [readme-http]: #http-clients
 [docs]: https://hexdocs.pm/safeurl
-[docs-get]: https://hexdocs.pm/safeurl/SafeURL.html#get/4
+[docs-get]: https://hexdocs.pm/safeurl/SafeURL.HTTPoison.html#get/3
 [docs-dns]: https://hexdocs.pm/safeurl/SafeURL.DNSResolver.html
+[docs-pin]: https://hexdocs.pm/safeurl/SafeURL.html#pin/2
+[lib-req]: https://hexdocs.pm/req
 [lib-dns]: https://github.com/tungd/elixir-dns
 [lib-tesla]: https://github.com/elixir-tesla/tesla
 [lib-httpoison]: https://github.com/edgurgel/httpoison
