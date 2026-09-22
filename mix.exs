@@ -57,6 +57,9 @@ defmodule SafeURL.MixProject do
   defp deps do
     [
       {:httpoison, "~> 1.0 or ~> 2.0", optional: true},
+      # SafeURL.Client rebuilds hackney's TLS defaults from the hostname, which
+      # needs :hackney_ssl.check_hostname_opts/1, exported since 1.16.0.
+      {:hackney, "~> 1.16", optional: true},
       {:inet_cidr, "~> 1.0 and >= 1.0.6"},
       {:dns, "~> 2.4"},
       {:tesla, "~> 1.0", optional: true},
@@ -74,7 +77,7 @@ defmodule SafeURL.MixProject do
       name: @app,
       maintainers: ["Slab"],
       licenses: ["BSD-3-Clause"],
-      files: ~w(mix.exs lib README.md),
+      files: ~w(mix.exs lib guides README.md),
       links: %{
         "Github" => @github,
         "Slab" => "https://slab.com/"
